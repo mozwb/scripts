@@ -95,7 +95,31 @@ def step_base():
 
 
 # ── 2 Linux QQ ───────────────────────────────────────────
-QQ_URL = "https://dldir1v6.qq.com/qqfile/qq/QQNT/Linux/linuxqq_3.2.27-47256_amd64.deb"
+# 官方地址写在一个 JS 配置里，每次发版都变，所以运行时去取，别写死
+QQ_CONFIG = "https://cdn-go.cn/qq-web/im.qq.com_new/latest/rainbow/linuxConfig.js"
+# 官方 CDN 会拦机房 IP（403），备胎是一个镜像仓库的 Release
+QQ_MIRROR_REPO = "Rodert/qq-versions"
+
+
+def resolve_qq_url():
+    req = urllib.request.Request(QQ_CONFIG, headers={"User-Agent": "Mozilla/5.0"})
+    js = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "replace")
+    for u in re.findall(r"https?://[^\"'\s]+", js):
+        if u.endswith("_amd64_01.deb"):
+            print("  官方 deb:", u)
+            return u
+    raise RuntimeError("官方配置里没找到 amd64 的 deb")
+
+
+def resolve_qq_mirror():
+    api = "https://api.github.com/repos/%s/releases/latest" % QQ_MIRROR_REPO
+    req = urllib.request.Request(api, headers={"User-Agent": "dsh"})
+    info = json.load(urllib.request.urlopen(req, timeout=30))
+    for a in info.get("assets", []):
+        if a["name"].endswith("_amd64_01.deb"):
+            print("  镜像 deb: %s (%.0f MB)" % (a["name"], a["size"] / 1048576))
+            return a["browser_download_url"]
+    raise RuntimeError("镜像里也没有 amd64 的 deb")
 
 
 def step_qq():
@@ -104,8 +128,47 @@ def step_qq():
         return
 
     print("[2] 安装 Linux QQ")
-    deb = download(QQ_URL, CACHE / "linuxqq.deb")
+    try:
+        url = resolve_qq_url()
+        deb = download(url, CACHE / "linuxqq.deb")
+    except Exception as e:
+        print("  官方源不行（%s），换镜像" % str(e)[:60])
+        try:
+            url = resolve_qq_mirror()
+            deb = download(url, CACHE / "linuxqq.deb")
+        except Exception as e2:
+            raise SystemExit(
+                "两条源都失败了: %s\n"
+                "手动下好放进 %s 并改名 linuxqq.deb 再重跑" % (e2, CACHE)
+            )
     sh("apt-get install -y %s" % deb)
+
+
+# ── 2.5 QQ 跑起来需要的系统库 ────────────────────────────
+# 无头容器里这些基本都没有，缺一个 QQ 就起不来（libasound 最常见）
+QQ_DEPS = [
+    "libasound2", "libnss3", "libgbm1", "libxss1", "libxtst6",
+    "libatk1.0-0", "libatk-bridge2.0-0", "libcups2", "libdrm2",
+    "libgtk-3-0", "libxcomposite1", "libxdamage1", "libxrandr2",
+    "libxkbcommon0", "libpango-1.0-0", "libcairo2", "libxshmfence1",
+    "libx11-xcb1", "xauth",
+]
+
+
+def step_qq_deps():
+    print("[2.5] 检查 QQ 运行库")
+    sh("apt-get update -qq")
+    for pkg in QQ_DEPS:
+        # 有的发行版包名带 t64 后缀，装不上就试一下，别整段挂掉
+        r = subprocess.run("apt-get install -y %s" % pkg, shell=True,
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            alt = pkg + "t64"
+            r2 = subprocess.run("apt-get install -y %s" % alt, shell=True,
+                                capture_output=True, text=True)
+            if r2.returncode != 0:
+                print("  跳过（装不上）:", pkg)
+    print("  运行库就绪")
 
 
 # ── 3 Node.js 24+ ────────────────────────────────────────
@@ -190,11 +253,12 @@ def download_main():
 
     step_base()
     step_qq()
+    step_qq_deps()
     step_node()
     step_dsh()
     step_snowluma()
 
-    print("\n全部就绪。下一步：起 QQ、起 SnowLuma、跑 bridge.py")
+    print("\n全部就绪。下一步：sudo python3 start.py")
 
 
 if __name__ == "__main__":
